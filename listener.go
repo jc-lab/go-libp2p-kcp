@@ -21,6 +21,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/transport"
 	ma "github.com/multiformats/go-multiaddr"
 	manet "github.com/multiformats/go-multiaddr/net"
+	"github.com/pkg/errors"
 	kcpgo "github.com/xtaci/kcp-go"
 	"github.com/xtaci/kcp-go/v5"
 	"net"
@@ -37,8 +38,19 @@ func (l *listener) start(laddr ma.Multiaddr) error {
 	if l.psk != nil {
 		block, _ = kcp.NewAESBlockCrypt(l.psk)
 	}
-	_, lnaddr, err := manet.DialArgs(laddr)
-	kcpListener, err := kcpgo.ListenWithOptions(lnaddr, block, 0, 0)
+	network, lnaddr, err := manet.DialArgs(laddr)
+	if err != nil {
+		return errors.WithStack(err)
+	}
+	udpaddr, err := net.ResolveUDPAddr(network, lnaddr)
+	if err != nil {
+		return errors.WithStack(err)
+	}
+	conn, err := net.ListenUDP(network, udpaddr)
+	if err != nil {
+		return errors.WithStack(err)
+	}
+	kcpListener, err := kcpgo.ServeConn(block, 10, 3, conn)
 	if err != nil {
 		return err
 	}

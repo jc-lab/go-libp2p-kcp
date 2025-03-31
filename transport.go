@@ -31,24 +31,47 @@ import (
 var log = logging.Logger("kcp-transport")
 
 type KcpTransport struct {
-	upgrader transport.Upgrader
-	rcmgr    network.ResourceManager
-	psk      pnet.PSK
-	opts     []scop.Option
+	upgrader                 transport.Upgrader
+	rcmgr                    network.ResourceManager
+	psk                      pnet.PSK
+	scopOpts                 []scop.Option
+	dataShards, parityShards int
 }
 
 var _ transport.Transport = (*KcpTransport)(nil)
 
-func NewTransport(upgrader transport.Upgrader, rcmgr network.ResourceManager, psk pnet.PSK, opts ...scop.Option) (*KcpTransport, error) {
+type Option func(t *KcpTransport)
+
+func WithScopOptions(opts ...scop.Option) Option {
+	return func(t *KcpTransport) {
+		t.scopOpts = opts
+	}
+}
+
+func WithKcpShards(dataShards, parityShards int) Option {
+	return func(t *KcpTransport) {
+		t.dataShards = dataShards
+		t.parityShards = parityShards
+	}
+}
+
+func NewTransport(upgrader transport.Upgrader, rcmgr network.ResourceManager, psk pnet.PSK, opts ...Option) (*KcpTransport, error) {
 	if rcmgr == nil {
 		rcmgr = &network.NullResourceManager{}
 	}
-	return &KcpTransport{
-		upgrader: upgrader,
-		rcmgr:    rcmgr,
-		psk:      psk,
-		opts:     opts,
-	}, nil
+	t := &KcpTransport{
+		upgrader:     upgrader,
+		rcmgr:        rcmgr,
+		psk:          psk,
+		dataShards:   10,
+		parityShards: 3,
+	}
+
+	for _, opt := range opts {
+		opt(t)
+	}
+
+	return t, nil
 }
 
 func (t *KcpTransport) Dial(ctx context.Context, raddr ma.Multiaddr, p peer.ID) (transport.CapableConn, error) {
@@ -85,7 +108,7 @@ func (t *KcpTransport) maDial(ctx context.Context, raddr ma.Multiaddr) (manet.Co
 	if t.psk != nil {
 		block, _ = kcp.NewAESBlockCrypt(t.psk)
 	}
-	c, err := kcpgo.DialWithOptions(host, block, 0, 0)
+	c, err := kcpgo.DialWithOptions(host, block, t.dataShards, t.parityShards)
 	if err != nil {
 		return nil, err
 	}
@@ -109,7 +132,9 @@ func (t *KcpTransport) CanDial(addr ma.Multiaddr) bool {
 
 func (t *KcpTransport) maListen(laddr ma.Multiaddr) (manet.Listener, error) {
 	l := &listener{
-		psk: t.psk,
+		psk:          t.psk,
+		dataShards:   t.dataShards,
+		parityShards: t.parityShards,
 	}
 	if err := l.start(laddr); err != nil {
 		return nil, err

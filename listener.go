@@ -28,9 +28,10 @@ import (
 )
 
 type listener struct {
-	laddr       ma.Multiaddr
-	psk         pnet.PSK
-	kcpListener net.Listener
+	laddr                    ma.Multiaddr
+	psk                      pnet.PSK
+	kcpListener              net.Listener
+	dataShards, parityShards int
 }
 
 func (l *listener) start(laddr ma.Multiaddr) error {
@@ -50,7 +51,7 @@ func (l *listener) start(laddr ma.Multiaddr) error {
 	if err != nil {
 		return errors.WithStack(err)
 	}
-	kcpListener, err := kcpgo.ServeConn(block, 10, 3, conn)
+	kcpListener, err := kcpgo.ServeConn(block, l.dataShards, l.parityShards, conn)
 	if err != nil {
 		return err
 	}

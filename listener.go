@@ -22,22 +22,24 @@ import (
 	ma "github.com/multiformats/go-multiaddr"
 	manet "github.com/multiformats/go-multiaddr/net"
 	"github.com/pkg/errors"
-	kcpgo "github.com/xtaci/kcp-go"
-	"github.com/xtaci/kcp-go/v5"
+	kcpgo "github.com/xtaci/kcp-go/v5"
 	"net"
 )
 
 type listener struct {
-	laddr                    ma.Multiaddr
-	psk                      pnet.PSK
-	kcpListener              net.Listener
+	laddr       ma.Multiaddr
+	psk         pnet.PSK
+	kcpListener net.Listener
+
 	dataShards, parityShards int
+	blockCryptFactory        BlockCryptFactory
+	mtu                      int
 }
 
 func (l *listener) start(laddr ma.Multiaddr) error {
-	var block kcp.BlockCrypt
-	if l.psk != nil {
-		block, _ = kcp.NewAESBlockCrypt(l.psk)
+	block, err := newBlockCrypt(l.blockCryptFactory, l.psk)
+	if err != nil {
+		return errors.WithStack(err)
 	}
 	network, lnaddr, err := manet.DialArgs(laddr)
 	if err != nil {

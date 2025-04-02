@@ -24,18 +24,20 @@ import (
 	"github.com/libp2p/go-libp2p/core/transport"
 	ma "github.com/multiformats/go-multiaddr"
 	manet "github.com/multiformats/go-multiaddr/net"
-	kcpgo "github.com/xtaci/kcp-go"
-	"github.com/xtaci/kcp-go/v5"
+	kcpgo "github.com/xtaci/kcp-go/v5"
 )
 
 var log = logging.Logger("kcp-transport")
 
 type KcpTransport struct {
-	upgrader                 transport.Upgrader
-	rcmgr                    network.ResourceManager
-	psk                      pnet.PSK
-	scopOpts                 []scop.Option
+	upgrader transport.Upgrader
+	rcmgr    network.ResourceManager
+	psk      pnet.PSK
+	scopOpts []scop.Option
+
 	dataShards, parityShards int
+	blockCryptFactory        BlockCryptFactory
+	mtu                      int
 }
 
 var _ transport.Transport = (*KcpTransport)(nil)
@@ -52,6 +54,20 @@ func WithKcpShards(dataShards, parityShards int) Option {
 	return func(t *KcpTransport) {
 		t.dataShards = dataShards
 		t.parityShards = parityShards
+	}
+}
+
+func WithMTU(mtu int) Option {
+	return func(t *KcpTransport) {
+		t.mtu = mtu
+	}
+}
+
+type BlockCryptFactory func(key []byte) (kcpgo.BlockCrypt, error)
+
+func WithKcpBlockCrypt(factory BlockCryptFactory) Option {
+	return func(t *KcpTransport) {
+		t.blockCryptFactory = factory
 	}
 }
 
@@ -104,14 +120,21 @@ func (t *KcpTransport) maDial(ctx context.Context, raddr ma.Multiaddr) (manet.Co
 	if err != nil {
 		return nil, err
 	}
-	var block kcp.BlockCrypt
-	if t.psk != nil {
-		block, _ = kcp.NewAESBlockCrypt(t.psk)
+
+	block, err := newBlockCrypt(t.blockCryptFactory, t.psk)
+	if err != nil {
+		return nil, err
 	}
+
 	c, err := kcpgo.DialWithOptions(host, block, t.dataShards, t.parityShards)
 	if err != nil {
 		return nil, err
 	}
+
+	if t.mtu > 0 {
+		c.SetMtu(t.mtu)
+	}
+
 	stream, err := scop.ClientWithContext(ctx, c)
 	if err != nil {
 		return nil, err
@@ -132,9 +155,11 @@ func (t *KcpTransport) CanDial(addr ma.Multiaddr) bool {
 
 func (t *KcpTransport) maListen(laddr ma.Multiaddr) (manet.Listener, error) {
 	l := &listener{
-		psk:          t.psk,
-		dataShards:   t.dataShards,
-		parityShards: t.parityShards,
+		psk:               t.psk,
+		dataShards:        t.dataShards,
+		parityShards:      t.parityShards,
+		blockCryptFactory: t.blockCryptFactory,
+		mtu:               t.mtu,
 	}
 	if err := l.start(laddr); err != nil {
 		return nil, err
@@ -156,6 +181,15 @@ func (t *KcpTransport) Protocols() []int {
 
 func (t *KcpTransport) Proxy() bool {
 	return false
+}
+
+func newBlockCrypt(factory BlockCryptFactory, psk []byte) (kcpgo.BlockCrypt, error) {
+	if factory != nil {
+		return factory(psk)
+	} else if psk != nil {
+		return kcpgo.NewAESBlockCrypt(psk)
+	}
+	return nil, nil
 }
 
 type capableConn struct {

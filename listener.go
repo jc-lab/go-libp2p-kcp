@@ -71,7 +71,7 @@ func (l *listener) clientNegotiation(ctx context.Context, conn net.Conn) (manet.
 		log.Errorf("scop server error: %+v", err)
 		return nil, err
 	}
-	maConn, err := manet.WrapNetConn(stream)
+	maConn, err := wrapNetConn(stream)
 	if err != nil {
 		log.Errorf("manet.WrapNetConn error: %+v", err)
 		return nil, err

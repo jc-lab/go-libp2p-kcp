@@ -140,13 +140,13 @@ func (t *KcpTransport) maDial(ctx context.Context, raddr ma.Multiaddr) (manet.Co
 		return nil, err
 	}
 
-	mnc, err := manet.WrapNetConn(stream)
+	maConn, err := wrapNetConn(stream)
 	if err != nil {
 		_ = stream.Close()
 		return nil, err
 	}
 
-	return mnc, nil
+	return maConn, nil
 }
 
 func (t *KcpTransport) CanDial(addr ma.Multiaddr) bool {

@@ -48,10 +48,10 @@ func ServerWithContext(parentCtx context.Context, parent net.Conn, opts ...Optio
 		return nil, ErrInvalidPacket
 	}
 
-	if err := conn.writeSegment(&Header{
-		Version: Version,
-		Flags:   FlagSYN | FlagACK,
-	}, nil); err != nil {
+	var header Header
+	header.Version = Version
+	header.Flags = FlagSYN | FlagACK
+	if err := conn.writeSegment(&header, nil); err != nil {
 		conn.closeOnce.Do(func() {
 			conn.closed()
 		})

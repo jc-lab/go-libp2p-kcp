@@ -187,7 +187,7 @@ func newBlockCrypt(factory BlockCryptFactory, psk []byte) (kcpgo.BlockCrypt, err
 	if factory != nil {
 		return factory(psk)
 	} else if psk != nil {
-		return kcpgo.NewAESBlockCrypt(psk)
+		return kcpgo.NewSimpleXORBlockCrypt(psk)
 	}
 	return nil, nil
 }

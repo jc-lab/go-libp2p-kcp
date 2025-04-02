@@ -16,6 +16,7 @@ package scop
 
 import (
 	"context"
+	pool "github.com/libp2p/go-buffer-pool"
 	"io"
 	"net"
 	"sync"
@@ -32,6 +33,8 @@ const (
 	StateHalfClosed
 )
 
+const MaxTransportMsgLength = 0xffff // kcpgo.IKCP_MTU_DEF - kcpgo.IKCP_OVERHEAD - headerSize
+
 type Conn struct {
 	config *Config
 	parent net.Conn
@@ -45,11 +48,14 @@ type Conn struct {
 
 	closeOnce sync.Once
 	mutex     sync.Mutex
+	readLock  sync.Mutex
+	writeLock sync.Mutex
 
 	ctx        context.Context
 	cancelFunc context.CancelFunc
 
-	readBuf []byte
+	qbuf  []byte
+	qseek int
 }
 
 func Client(parent net.Conn, opts ...Option) (*Conn, error) {
@@ -95,14 +101,13 @@ func (c *Conn) getState() ConnState {
 }
 
 func (c *Conn) connect() error {
-	header := &Header{
-		Version: Version,
-		Flags:   FlagSYN,
-	}
+	var header Header
+	header.Version = Version
+	header.Flags = FlagSYN
 
 	rto := c.config.InitialRTO
 	for i := 0; i < c.config.MaxRetries; i++ {
-		if err := c.writeSegment(header, nil); err != nil {
+		if err := c.writeSegment(&header, nil); err != nil {
 			return err
 		}
 
@@ -129,21 +134,23 @@ func (c *Conn) connect() error {
 }
 
 func (c *Conn) readSegment() (*Header, []byte, error) {
-	headerBuf := make([]byte, headerSize)
+	header := &Header{}
 
-	n, err := io.ReadFull(c.parent, headerBuf)
+	segBuf := pool.Get(headerSize)
+	defer pool.Put(segBuf)
+
+	n, err := io.ReadFull(c.parent, segBuf)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	header := &Header{}
-	if err := header.Unpack(headerBuf[:n]); err != nil {
+	if err := header.Unpack(segBuf[:n]); err != nil {
 		return nil, nil, err
 	}
 
 	var data []byte
 	if header.DataSize > 0 {
-		data = make([]byte, header.DataSize)
+		data = pool.Get(int(header.DataSize))
 		if _, err = io.ReadFull(c.parent, data); err != nil {
 			return nil, nil, err
 		}
@@ -159,9 +166,12 @@ func (c *Conn) readSegment() (*Header, []byte, error) {
 }
 
 func (c *Conn) waitForAck() (*Header, error) {
-	header, _, err := c.waitSegment()
+	header, data, err := c.waitSegment()
 	if err != nil {
 		return nil, err
+	}
+	if data != nil {
+		pool.Put(data)
 	}
 
 	if (header.Flags&FlagACK) == 0 || header.DataSize != 0 {
@@ -172,8 +182,13 @@ func (c *Conn) waitForAck() (*Header, error) {
 }
 
 func (c *Conn) writeSegment(header *Header, payload []byte) error {
-	packet := append(header.Pack(), payload...)
-	_, err := c.parent.Write(packet)
+	segBuf := pool.Get(headerSize + MaxTransportMsgLength)
+	defer pool.Put(segBuf)
+	n := header.PackTo(segBuf[:headerSize])
+	n += copy(segBuf[n:], payload)
+	_ = c.parent.SetWriteDeadline(time.Now().Add(time.Second * 3))
+	defer c.parent.SetWriteDeadline(time.Time{})
+	_, err := c.parent.Write(segBuf[:n])
 	return err
 }
 
@@ -187,38 +202,63 @@ func (c *Conn) waitSegment() (*Header, []byte, error) {
 	return c.readSegment()
 }
 
-func (c *Conn) Write(b []byte) (n int, err error) {
+func (c *Conn) Write(data []byte) (n int, err error) {
+	var header Header
+
+	c.writeLock.Lock()
+	defer c.writeLock.Unlock()
+
 	if c.getState() != StateEstablished {
 		return 0, ErrInvalidState
 	}
 
-	header := &Header{
-		Version:  Version,
-		Flags:    FlagPSH,
-		DataSize: uint16(len(b)),
+	header.Version = Version
+	header.Flags = FlagPSH
+
+	total := len(data)
+	written := 0
+	for written < total {
+		end := written + MaxTransportMsgLength
+		if end > total {
+			end = total
+		}
+
+		chunk := data[written:end]
+
+		header.DataSize = uint16(len(chunk))
+		err = c.writeSegment(&header, chunk)
+		if err != nil {
+			return written, err
+		}
+
+		written = end
 	}
 
-	return len(b), c.writeSegment(header, b)
+	return written, nil
 }
 
 func (c *Conn) Read(b []byte) (n int, err error) {
-	if len(c.readBuf) > 0 {
-		n = copy(b, c.readBuf)
-		c.readBuf = c.readBuf[n:]
+	c.readLock.Lock()
+	defer c.readLock.Unlock()
+
+	if len(c.qbuf) > 0 {
+		copied := copy(b, c.qbuf[c.qseek:])
+		c.qseek += copied
+		if c.qseek == len(c.qbuf) {
+			pool.Put(c.qbuf)
+			c.qseek, c.qbuf = 0, nil
+		}
+		return copied, nil
 	}
-	if n > 0 {
-		return n, nil
-	}
-	var chunk []byte
-	for chunk == nil {
-		chunk, err = c.readData()
+
+	for c.qbuf == nil {
+		c.qbuf, err = c.readData()
 		if err != nil {
 			return 0, err
 		}
 	}
-	n = copy(b, chunk)
-	c.readBuf = chunk[n:]
-	return
+	c.qseek = copy(b, c.qbuf)
+	return c.qseek, nil
 }
 
 func (c *Conn) readData() ([]byte, error) {
@@ -245,10 +285,16 @@ func (c *Conn) readData() ([]byte, error) {
 	}
 
 	if err = c.checkControl(header); err != nil {
+		if data != nil {
+			pool.Put(data)
+		}
 		return nil, err
 	}
 
 	if header.Flags&FlagPSH == 0 {
+		if data != nil {
+			pool.Put(data)
+		}
 		return nil, nil
 	}
 
@@ -280,10 +326,10 @@ func (c *Conn) closed() {
 }
 
 func (c *Conn) reset() error {
-	err := c.writeSegment(&Header{
-		Version: Version,
-		Flags:   FlagRST,
-	}, nil)
+	var header Header
+	header.Version = Version
+	header.Flags = FlagRST
+	err := c.writeSegment(&header, nil)
 
 	c.closeOnce.Do(func() {
 		c.closed()
@@ -302,6 +348,10 @@ func (c *Conn) startKeepalive() {
 	c.keepaliveTimer = time.NewTimer(c.config.KeepaliveInterval)
 
 	go func() {
+		var header Header
+		header.Version = Version
+		header.Flags = 0 // No flags for keepalive
+
 		for {
 			select {
 			case <-c.keepaliveTimer.C:
@@ -311,10 +361,7 @@ func (c *Conn) startKeepalive() {
 				}
 
 				// Send keepalive packet
-				if err := c.writeSegment(&Header{
-					Version: Version,
-					Flags:   0, // No flags for keepalive
-				}, nil); err != nil {
+				if err := c.writeSegment(&header, nil); err != nil {
 					_ = c.reset()
 					return
 				}

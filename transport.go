@@ -17,6 +17,7 @@ package kcp
 import (
 	"context"
 	logging "github.com/ipfs/go-log/v2"
+	"github.com/jc-lab/go-libp2p-kcp/kcptune"
 	"github.com/jc-lab/go-libp2p-kcp/scop"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -29,6 +30,8 @@ import (
 
 var log = logging.Logger("kcp-transport")
 
+type SessionConfigurer func(*kcpgo.UDPSession) error
+
 type KcpTransport struct {
 	upgrader transport.Upgrader
 	rcmgr    network.ResourceManager
@@ -37,7 +40,7 @@ type KcpTransport struct {
 
 	dataShards, parityShards int
 	blockCryptFactory        BlockCryptFactory
-	mtu                      int
+	configurer               SessionConfigurer
 }
 
 var _ transport.Transport = (*KcpTransport)(nil)
@@ -57,9 +60,9 @@ func WithKcpShards(dataShards, parityShards int) Option {
 	}
 }
 
-func WithMTU(mtu int) Option {
+func WithSessionConfigurer(configurer SessionConfigurer) Option {
 	return func(t *KcpTransport) {
-		t.mtu = mtu
+		t.configurer = configurer
 	}
 }
 
@@ -131,8 +134,12 @@ func (t *KcpTransport) maDial(ctx context.Context, raddr ma.Multiaddr) (manet.Co
 		return nil, err
 	}
 
-	if t.mtu > 0 {
-		c.SetMtu(t.mtu)
+	kcptune.Default(c)
+	if t.configurer != nil {
+		if err := t.configurer(c); err != nil {
+			_ = c.Close()
+			return nil, err
+		}
 	}
 
 	stream, err := scop.ClientWithContext(ctx, c)
@@ -159,7 +166,7 @@ func (t *KcpTransport) maListen(laddr ma.Multiaddr) (manet.Listener, error) {
 		dataShards:        t.dataShards,
 		parityShards:      t.parityShards,
 		blockCryptFactory: t.blockCryptFactory,
-		mtu:               t.mtu,
+		configurer:        t.configurer,
 	}
 	if err := l.start(laddr); err != nil {
 		return nil, err

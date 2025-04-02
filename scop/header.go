@@ -39,12 +39,11 @@ type Header struct {
 	DataSize uint16
 }
 
-func (h *Header) Pack() []byte {
-	buf := make([]byte, 4)
+func (h *Header) PackTo(buf []byte) int {
 	buf[0] = h.Version
 	buf[1] = h.Flags
 	binary.BigEndian.PutUint16(buf[2:], h.DataSize)
-	return buf
+	return headerSize
 }
 
 func (h *Header) Unpack(data []byte) error {

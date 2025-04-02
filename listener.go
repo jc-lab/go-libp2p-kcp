@@ -16,6 +16,7 @@ package kcp
 
 import (
 	"context"
+	"github.com/jc-lab/go-libp2p-kcp/kcptune"
 	"github.com/jc-lab/go-libp2p-kcp/scop"
 	"github.com/libp2p/go-libp2p/core/pnet"
 	"github.com/libp2p/go-libp2p/core/transport"
@@ -29,11 +30,11 @@ import (
 type listener struct {
 	laddr       ma.Multiaddr
 	psk         pnet.PSK
-	kcpListener net.Listener
+	kcpListener *kcpgo.Listener
 
 	dataShards, parityShards int
 	blockCryptFactory        BlockCryptFactory
-	mtu                      int
+	configurer               SessionConfigurer
 }
 
 func (l *listener) start(laddr ma.Multiaddr) error {
@@ -81,10 +82,19 @@ func (l *listener) clientNegotiation(ctx context.Context, conn net.Conn) (manet.
 
 func (l *listener) Accept() (manet.Conn, error) {
 	for {
-		netConn, err := l.kcpListener.Accept()
+		netConn, err := l.kcpListener.AcceptKCP()
 		if err != nil {
 			return nil, err
 		}
+
+		kcptune.Default(netConn)
+		if l.configurer != nil {
+			if err := l.configurer(netConn); err != nil {
+				_ = netConn.Close()
+				return nil, err
+			}
+		}
+
 		maConn, err := l.clientNegotiation(context.Background(), netConn)
 		if err != nil {
 			log.Warnf("client[%s] negotiation failed: %+v", netConn.RemoteAddr().String(), err)

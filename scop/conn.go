@@ -244,10 +244,7 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 	if len(c.qbuf) > 0 {
 		copied := copy(b, c.qbuf[c.qseek:])
 		c.qseek += copied
-		if c.qseek == len(c.qbuf) {
-			pool.Put(c.qbuf)
-			c.qseek, c.qbuf = 0, nil
-		}
+		c.qbufClearIfNeeded()
 		return copied, nil
 	}
 
@@ -257,8 +254,17 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 			return 0, err
 		}
 	}
-	c.qseek = copy(b, c.qbuf)
-	return c.qseek, nil
+	copied := copy(b, c.qbuf)
+	c.qseek = copied
+	c.qbufClearIfNeeded()
+	return copied, nil
+}
+
+func (c *Conn) qbufClearIfNeeded() {
+	if c.qseek == len(c.qbuf) {
+		pool.Put(c.qbuf)
+		c.qseek, c.qbuf = 0, nil
+	}
 }
 
 func (c *Conn) readData() ([]byte, error) {
